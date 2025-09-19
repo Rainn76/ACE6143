@@ -1,5 +1,7 @@
 import socket, sys, time, hashlib, base64
 
+MAX_RETRIES = 3  # max retransmissions
+
 def encrypt(msg, key="ace6143"):
     """Simple XOR encryption"""
     encrypted = bytearray()
@@ -40,6 +42,32 @@ def connect_socket(protocol):
             time.sleep(1)
     return None
 
+def send_and_receive(s, protocol, send_data, hostname, port):
+    """Send data and handle retransmission"""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            if protocol == "tcp":
+                s.send(send_data.encode())
+                reply = s.recv(1024).decode()
+            else:
+                s.sendto(send_data.encode(), (hostname, port))
+                reply, _ = s.recvfrom(1024)
+                reply = reply.decode()
+
+            # Check for corruption
+            if checksum(reply) != checksum(send_data):
+                print(f"[WARN] Corrupted packet (attempt {attempt}), retransmitting...")
+                continue
+
+            return reply  # success
+
+        except socket.timeout:
+            print(f"[WARN] Timeout (attempt {attempt}), retransmitting...")
+            continue
+
+    print("[ERROR] Retries exceeded. Message failed.")
+    return None
+
 def main():
     protocol = input("Protocol (tcp/udp): ").lower().strip()
     encrypt_enable = input("Enable encryption (y/n): ").lower().strip() == 'y'
@@ -70,39 +98,22 @@ def main():
             if encrypt_enable:
                 print(f"[ENCRYPT] Message encrypted")
 
-            try:
-                # Send and receive
-                if protocol == "tcp":
-                    s.send(send_data.encode())
-                    reply = s.recv(1024).decode()
-                else:
-                    s.sendto(send_data.encode(), (hostname, port))
-                    reply, _ = s.recvfrom(1024)
-                    reply = reply.decode()
-                
-                # Process response
-                rtt = (time.time() - start_time) * 1000
-                stats['received'] += 1
-                stats['total_time'] += rtt
-                
-                final_reply = decrypt(reply) if encrypt_enable else reply
-                reply_checksum = checksum(reply)
-                
-                print(f"[RECV] {final_reply.strip()}")
-                print(f"[RECV] Checksum: {reply_checksum}")
-                print(f"[TIME] RTT: {rtt:.1f}ms")
-                
-            except socket.timeout:
-                print("[ERROR] Timeout")
-            except Exception as e:
-                print(f"[ERROR] {e}")
-                if protocol == "tcp":
-                    print("[TCP] Reconnecting...")
-                    s.close()
-                    s = connect_socket(protocol)
-                    if not s:
-                        break
+            reply = send_and_receive(s, protocol, send_data, hostname, port)
+            if reply is None:
+                continue  # skip if retries failed
 
+            # Process response
+            rtt = (time.time() - start_time) * 1000
+            stats['received'] += 1
+            stats['total_time'] += rtt
+            
+            final_reply = decrypt(reply) if encrypt_enable else reply
+            reply_checksum = checksum(reply)
+            
+            print(f"[RECV] {final_reply.strip()}")
+            print(f"[RECV] Checksum: {reply_checksum}")
+            print(f"[TIME] RTT: {rtt:.1f}ms")
+                
     except KeyboardInterrupt:
         print("\n[INFO] Disconnecting...")
 
